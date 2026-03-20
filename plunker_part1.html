@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Plunker — Browser FPS</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+canvas { display: block; }
+
+/* ── Lock‑screen overlay ── */
+#lock-screen {
+  position: fixed; inset: 0; z-index: 100;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  background: rgba(0,0,0,0.85); color: #fff; font-family: 'Segoe UI', sans-serif;
+  cursor: pointer; user-select: none;
+}
+#lock-screen h1 { font-size: 52px; letter-spacing: 4px; margin-bottom: 12px; }
+#lock-screen p  { font-size: 18px; opacity: 0.7; }
+#lock-screen.hidden { display: none; }
+
+/* ── HUD ── */
+#hud {
+  position: fixed; inset: 0; z-index: 50;
+  pointer-events: none; font-family: 'Segoe UI', sans-serif;
+}
+
+/* Crosshair */
+#crosshair {
+  position: absolute; top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  width: 24px; height: 24px;
+}
+#crosshair::before, #crosshair::after {
+  content: ''; position: absolute; background: rgba(255,255,255,0.9);
+}
+#crosshair::before { width: 2px; height: 24px; left: 11px; top: 0; }
+#crosshair::after  { width: 24px; height: 2px; top: 11px; left: 0; }
+
+/* Health bar — bottom left */
+#health-wrap {
+  position: absolute; bottom: 28px; left: 28px;
+  display: flex; align-items: center; gap: 10px;
+}
+#health-icon { font-size: 22px; color: #ff4444; }
+#health-bar-bg {
+  width: 180px; height: 14px; background: rgba(255,255,255,0.15);
+  border-radius: 3px; overflow: hidden;
+}
+#health-bar {
+  width: 100%; height: 100%; background: #ff4444;
+  transition: width 0.25s ease;
+}
+#health-text {
+  color: #fff; font-size: 16px; font-weight: 700; min-width: 32px;
+}
+
+/* Ammo — bottom right */
+#ammo-wrap {
+  position: absolute; bottom: 28px; right: 28px;
+  display: flex; align-items: baseline; gap: 6px; color: #fff;
+}
+#ammo-clip  { font-size: 36px; font-weight: 700; }
+#ammo-sep   { font-size: 20px; opacity: 0.5; }
+#ammo-total { font-size: 20px; opacity: 0.7; }
+
+/* Kills — top right */
+#kills {
+  position: absolute; top: 20px; right: 28px;
+  color: #fff; font-size: 18px; font-weight: 600;
+  text-shadow: 0 1px 4px rgba(0,0,0,0.6);
+}
+
+/* Speed indicator — bottom center (debug‑style) */
+#speed-indicator {
+  position: absolute; bottom: 28px; left: 50%;
+  transform: translateX(-50%);
+  color: rgba(255,255,255,0.4); font-size: 13px; font-family: monospace;
+}
+</style>
+</head>
+<body>
+
+<!-- Lock screen -->
+<div id="lock-screen">
+  <h1>PLUNKER</h1>
+  <p>Click to play</p>
+</div>
+
+<!-- HUD -->
+<div id="hud">
+  <div id="crosshair"></div>
+
+  <div id="health-wrap">
+    <span id="health-icon">+</span>
+    <div id="health-bar-bg"><div id="health-bar"></div></div>
+    <span id="health-text">100</span>
+  </div>
+
+  <div id="ammo-wrap">
+    <span id="ammo-clip">30</span>
+    <span id="ammo-sep">/</span>
+    <span id="ammo-total">90</span>
+  </div>
+
+  <div id="kills">Kills: 0</div>
+
+  <div id="speed-indicator"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+'use strict';
+
+/* ================================================================
+   CONFIG
+   ================================================================ */
+const CFG = {
+  // Movement
+  MOVE_SPEED:       8.0,
+  STRAFE_MULTI:     1.2,     // diagonal speed multiplier
+  JUMP_FORCE:       9.0,
+  GRAVITY:         -25.0,
+  CROUCH_HEIGHT:    0.9,
+  STAND_HEIGHT:     1.7,
+  CROUCH_SPEED:     0.45,    // fraction of normal speed while crouched
+
+  // Slidehop
+  SLIDE_BOOST:      1.5,
+  SLIDE_DURATION:   0.4,     // seconds
+
+  // Bunny-hop
+  BHOP_WINDOW:      0.15,    // seconds after landing to chain a jump
+  BHOP_ACCEL:       1.08,    // momentum multiplier per consecutive hop
+  BHOP_MAX:         1.6,     // max bhop multiplier
+
+  // Physics
+  AIR_CONTROL:      0.3,     // fraction of ground acceleration while airborne
+  GROUND_FRICTION:  8.0,
+  PLAYER_RADIUS:    0.4,
+
+  // Mouse
+  MOUSE_SENS:       0.002,
+
+  // World bounds
+  ARENA_HALF:       40,
+  WALL_HEIGHT:      8,
+};
+
+/* ================================================================
+   STATE
+   ================================================================ */
+const keys   = {};
+const mouse  = { dx: 0, dy: 0 };
+
+const player = {
+  pos:         new THREE.Vector3(0, CFG.STAND_HEIGHT, 0),
+  vel:         new THREE.Vector3(),
+  yaw:         0,
+  pitch:       0,
+  onGround:    false,
+  isCrouching: false,
+  height:      CFG.STAND_HEIGHT,
+
+  // Slidehop state
+  slideTimer:  0,
+  slideMulti:  1,
+
+  // Bhop state
+  bhopMulti:   1,
+  landTimer:   0,
+  jumpChain:   0,
+
+  // HUD
+  health: 100,
+  clipAmmo: 30,
+  totalAmmo: 90,
+  kills: 0,
+};
+
+let locked = false;
+
+/* ================================================================
+   THREE.JS SETUP
+   ================================================================ */
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const scene  = new THREE.Scene();
+scene.background = new THREE.Color(0x87ceeb);           // sky blue
+scene.fog = new THREE.Fog(0x87ceeb, 60, 120);           // distance fog
+
+const camera = new THREE.PerspectiveCamera(90, window.innerWidth / window.innerHeight, 0.1, 200);
+scene.add(camera);
+
+/* ================================================================
+   LIGHTING
+   ================================================================ */
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+scene.add(ambientLight);
+
+const dirLight = new THREE.DirectionalLight(0xfff4e0, 0.9);
+dirLight.position.set(30, 50, 20);
+dirLight.castShadow = true;
+dirLight.shadow.mapSize.set(2048, 2048);
+dirLight.shadow.camera.left   = -CFG.ARENA_HALF;
+dirLight.shadow.camera.right  =  CFG.ARENA_HALF;
+dirLight.shadow.camera.top    =  CFG.ARENA_HALF;
+dirLight.shadow.camera.bottom = -CFG.ARENA_HALF;
+dirLight.shadow.camera.near   = 1;
+dirLight.shadow.camera.far    = 120;
+scene.add(dirLight);
+
+/* ================================================================
+   MAP GEOMETRY  (Krunker "Burg"-style blocky arena)
+   ================================================================ */
+const colliders = [];   // array of THREE.Box3 for collision
+
+function addBox(w, h, d, x, y, z, color) {
+  const geo  = new THREE.BoxGeometry(w, h, d);
+  const mat  = new THREE.MeshLambertMaterial({ color });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.set(x, y, z);
+  mesh.castShadow    = true;
+  mesh.receiveShadow = true;
+  scene.add(mesh);
+
+  // AABB collider
+  const box = new THREE.Box3().setFromObject(mesh);
+  colliders.push(box);
+  return mesh;
+}
+
+// Ground
+const groundGeo = new THREE.PlaneGeometry(CFG.ARENA_HALF * 2, CFG.ARENA_HALF * 2);
+const groundMat = new THREE.MeshLambertMaterial({ color: 0x8fbc8f });
+const ground    = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+// Boundary walls
+const WH = CFG.WALL_HEIGHT;
+const AH = CFG.ARENA_HALF;
+const wallColor = 0x9e9e9e;
+addBox(AH * 2, WH, 1,   0, WH / 2,  AH,  wallColor);  // north
+addBox(AH * 2, WH, 1,   0, WH / 2, -AH,  wallColor);  // south
+addBox(1, WH, AH * 2,   AH,  WH / 2, 0,   wallColor);  // east
+addBox(1, WH, AH * 2,  -AH,  WH / 2, 0,   wallColor);  // west
+
+// ── Buildings / cover ──
+// Central large building
+addBox(10, 6, 10,   0, 3, 0,      0xb0826e);
+// Ramp onto central building
+addBox(4, 0.5, 8,   7, 1.5, 0,    0xc4a882);
+
+// Side structures
+addBox(6, 4, 6,    20, 2,  15,    0x7e8cc4);
+addBox(6, 5, 6,   -18, 2.5, -12,  0xc47e7e);
+addBox(8, 3, 5,    12, 1.5, -20,  0x7ec4a0);
+addBox(5, 7, 5,   -25, 3.5,  20,  0xc4b87e);
+addBox(7, 4, 7,    25, 2, -25,    0x8a7ec4);
+addBox(4, 3, 12,  -10, 1.5, 25,   0x7ec4c4);
+
+// Low cover walls (waist-high)
+addBox(8, 1.5, 1,   10, 0.75, 8,   0xa0a0a0);
+addBox(1, 1.5, 8,  -8,  0.75, -6,  0xa0a0a0);
+addBox(6, 1.5, 1,   0,  0.75, 18,  0xa0a0a0);
+addBox(1, 1.5, 6,   18, 0.75, -5,  0xa0a0a0);
+
+// Elevated platform with stairs feel
+addBox(12, 2, 6,   -20, 1,  5,    0xb89e7e);
+addBox(6,  1, 6,   -14, 0.5, 5,   0xc4b08a);
+
+/* ================================================================
+   POINTER LOCK
+   ================================================================ */
+const lockScreen = document.getElementById('lock-screen');
+
+lockScreen.addEventListener('click', () => {
+  renderer.domElement.requestPointerLock();
+});
+
+document.addEventListener('pointerlockchange', () => {
+  locked = !!document.pointerLockElement;
+  lockScreen.classList.toggle('hidden', locked);
+});
+
+document.addEventListener('mousemove', (e) => {
+  if (!locked) return;
+  mouse.dx += e.movementX;
+  mouse.dy += e.movementY;
+});
+
+/* ================================================================
+   INPUT
+   ================================================================ */
+document.addEventListener('keydown', (e) => { keys[e.code] = true;  });
+document.addEventListener('keyup',   (e) => { keys[e.code] = false; });
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+/* ================================================================
+   COLLISION HELPERS
+   ================================================================ */
+function playerAABB(pos, height) {
+  const r = CFG.PLAYER_RADIUS;
+  return new THREE.Box3(
+    new THREE.Vector3(pos.x - r, pos.y - height, pos.z - r),
+    new THREE.Vector3(pos.x + r, pos.y + 0.1,     pos.z + r)
+  );
+}
+
+// Attempt to move along one axis; returns true if blocked
+function tryMove(pos, height, axis, delta) {
+  const test = pos.clone();
+  test[axis] += delta;
+  const aabb = playerAABB(test, height);
+  for (const box of colliders) {
+    if (aabb.intersectsBox(box)) return true;
+  }
+  pos[axis] += delta;
+  return false;
+}
+
+/* ================================================================
+   HUD UPDATE
+   ================================================================ */
+const elHealthBar  = document.getElementById('health-bar');
+const elHealthText = document.getElementById('health-text');
+const elClip       = document.getElementById('ammo-clip');
+const elTotal      = document.getElementById('ammo-total');
+const elKills      = document.getElementById('kills');
+const elSpeed      = document.getElementById('speed-indicator');
+
+function updateHUD() {
+  const hp = Math.max(0, player.health);
+  elHealthBar.style.width = hp + '%';
+  elHealthText.textContent = hp;
+
+  elClip.textContent  = player.clipAmmo;
+  elTotal.textContent = player.totalAmmo;
+  elKills.textContent = 'Kills: ' + player.kills;
+
+  // Speed readout
+  const hSpeed = Math.sqrt(player.vel.x ** 2 + player.vel.z ** 2).toFixed(1);
+  elSpeed.textContent = hSpeed + ' u/s';
+}
+
+/* ================================================================
+   GAME LOOP
+   ================================================================ */
+let prevTime = performance.now();
+
+function tick() {
+  requestAnimationFrame(tick);
+
+  const now = performance.now();
+  let dt = (now - prevTime) / 1000;
+  prevTime = now;
+  if (dt > 0.1) dt = 0.1;   // clamp large spikes
+
+  if (!locked) { renderer.render(scene, camera); return; }
+
+  /* ── Mouse look ── */
+  player.yaw   -= mouse.dx * CFG.MOUSE_SENS;
+  player.pitch  -= mouse.dy * CFG.MOUSE_SENS;
+  player.pitch   = Math.max(-Math.PI / 2 + 0.01, Math.min(Math.PI / 2 - 0.01, player.pitch));
+  mouse.dx = 0;
+  mouse.dy = 0;
+
+  /* ── Crouch ── */
+  const wantCrouch = !!keys['ShiftLeft'] || !!keys['ShiftRight'];
+  if (wantCrouch && !player.isCrouching) {
+    player.isCrouching = true;
+  } else if (!wantCrouch && player.isCrouching) {
+    // Only uncrouch if there's headroom
+    const testPos = player.pos.clone();
+    testPos.y += (CFG.STAND_HEIGHT - CFG.CROUCH_HEIGHT);
+    const aabb = playerAABB(testPos, CFG.STAND_HEIGHT);
+    let blocked = false;
+    for (const box of colliders) {
+      if (aabb.intersectsBox(box)) { blocked = true; break; }
+    }
+    if (!blocked) player.isCrouching = false;
+  }
+
+  const targetHeight = player.isCrouching ? CFG.CROUCH_HEIGHT : CFG.STAND_HEIGHT;
+  player.height += (targetHeight - player.height) * Math.min(1, dt * 12);
+
+  /* ── Build wish direction ── */
+  const forward = new THREE.Vector3(-Math.sin(player.yaw), 0, -Math.cos(player.yaw));
+  const right   = new THREE.Vector3(forward.z, 0, -forward.x);
+
+  const wish = new THREE.Vector3();
+  if (keys['KeyW'] || keys['ArrowUp'])    wish.add(forward);
+  if (keys['KeyS'] || keys['ArrowDown'])  wish.sub(forward);
+  if (keys['KeyA'] || keys['ArrowLeft'])  wish.sub(right);
+  if (keys['KeyD'] || keys['ArrowRight']) wish.add(right);
+
+  const isDiag = (keys['KeyW'] || keys['ArrowUp'] || keys['KeyS'] || keys['ArrowDown']) &&
+                 (keys['KeyA'] || keys['ArrowLeft'] || keys['KeyD'] || keys['ArrowRight']);
+
+  if (wish.lengthSq() > 0) wish.normalize();
+
+  /* ── Speed multipliers ── */
+  let speedMulti = 1.0;
+  if (isDiag)               speedMulti *= CFG.STRAFE_MULTI;
+  if (player.isCrouching)   speedMulti *= CFG.CROUCH_SPEED;
+  if (player.slideTimer > 0) speedMulti *= player.slideMulti;
+  speedMulti *= player.bhopMulti;
+
+  const moveSpeed = CFG.MOVE_SPEED * speedMulti;
+
+  /* ── Ground / air acceleration ── */
+  if (player.onGround) {
+    // Ground: apply friction then accelerate
+    const friction = Math.max(0, 1 - CFG.GROUND_FRICTION * dt);
+    player.vel.x *= friction;
+    player.vel.z *= friction;
+
+    player.vel.x += wish.x * moveSpeed * dt * 10;
+    player.vel.z += wish.z * moveSpeed * dt * 10;
+
+    // Clamp horizontal speed on ground (unless slidehop / bhop boosted)
+    const hSpeed = Math.sqrt(player.vel.x ** 2 + player.vel.z ** 2);
+    if (hSpeed > moveSpeed) {
+      player.vel.x *= moveSpeed / hSpeed;
+      player.vel.z *= moveSpeed / hSpeed;
+    }
+  } else {
+    // Air: reduced control
+    player.vel.x += wish.x * moveSpeed * CFG.AIR_CONTROL * dt * 10;
+    player.vel.z += wish.z * moveSpeed * CFG.AIR_CONTROL * dt * 10;
+  }
+
+  /* ── Gravity ── */
+  player.vel.y += CFG.GRAVITY * dt;
+
+  /* ── Timers ── */
+  if (player.slideTimer > 0) {
+    player.slideTimer -= dt;
+    // Decelerate slide multiplier toward 1
+    player.slideMulti += (1 - player.slideMulti) * Math.min(1, dt * 4);
+  }
+  if (player.landTimer > 0) player.landTimer -= dt;
+
+  /* ── Jumping ── */
+  const wantJump = !!keys['Space'];
+  if (wantJump && player.onGround) {
+    player.vel.y = CFG.JUMP_FORCE;
+    player.onGround = false;
+
+    // Bhop: if we're within the land window, chain jumps
+    if (player.landTimer > 0) {
+      player.jumpChain++;
+      player.bhopMulti = Math.min(CFG.BHOP_MAX,
+        player.bhopMulti * CFG.BHOP_ACCEL);
+    } else {
+      player.jumpChain = 0;
+      player.bhopMulti = 1;
+    }
+  }
+
+  /* ── Move with collision (split axes) ── */
+  // Y axis first (vertical)
+  const wasOnGround = player.onGround;
+  const blockedY = tryMove(player.pos, player.height, 'y', player.vel.y * dt);
+  if (blockedY) {
+    if (player.vel.y < 0) {
+      // Landing
+      if (!wasOnGround) {
+        player.onGround = true;
+        player.landTimer = CFG.BHOP_WINDOW;
+
+        // Slidehop: crouch while landing
+        if (player.isCrouching && Math.sqrt(player.vel.x ** 2 + player.vel.z ** 2) > 2) {
+          player.slideTimer = CFG.SLIDE_DURATION;
+          player.slideMulti = CFG.SLIDE_BOOST;
+        }
+      }
+      player.onGround = true;
+    }
+    player.vel.y = 0;
+  } else {
+    // Check if we're still on ground (walk off edge)
+    if (player.onGround) {
+      const groundCheck = player.pos.clone();
+      groundCheck.y -= 0.05;
+      const aabb = playerAABB(groundCheck, player.height);
+      let supported = groundCheck.y - player.height <= 0.01; // ground plane
+      for (const box of colliders) {
+        if (aabb.intersectsBox(box)) { supported = true; break; }
+      }
+      if (!supported) player.onGround = false;
+    }
+  }
+
+  // X axis
+  const blockedX = tryMove(player.pos, player.height, 'x', player.vel.x * dt);
+  if (blockedX) player.vel.x = 0;
+
+  // Z axis
+  const blockedZ = tryMove(player.pos, player.height, 'z', player.vel.z * dt);
+  if (blockedZ) player.vel.z = 0;
+
+  // Ground plane floor
+  if (player.pos.y - player.height < 0) {
+    player.pos.y = player.height;
+    if (player.vel.y < 0) {
+      if (!player.onGround) {
+        player.landTimer = CFG.BHOP_WINDOW;
+        if (player.isCrouching && Math.sqrt(player.vel.x ** 2 + player.vel.z ** 2) > 2) {
+          player.slideTimer = CFG.SLIDE_DURATION;
+          player.slideMulti = CFG.SLIDE_BOOST;
+        }
+      }
+      player.vel.y = 0;
+      player.onGround = true;
+    }
+  }
+
+  // Arena bounds clamp
+  const bnd = CFG.ARENA_HALF - CFG.PLAYER_RADIUS - 0.6;
+  player.pos.x = Math.max(-bnd, Math.min(bnd, player.pos.x));
+  player.pos.z = Math.max(-bnd, Math.min(bnd, player.pos.z));
+
+  // Decay bhop if on ground and not chaining
+  if (player.onGround && player.landTimer <= 0 && player.bhopMulti > 1) {
+    player.bhopMulti += (1 - player.bhopMulti) * Math.min(1, dt * 5);
+    if (player.bhopMulti < 1.01) player.bhopMulti = 1;
+  }
+
+  /* ── Camera ── */
+  camera.position.copy(player.pos);
+  camera.rotation.order = 'YXZ';
+  camera.rotation.y = player.yaw;
+  camera.rotation.x = player.pitch;
+
+  /* ── HUD ── */
+  updateHUD();
+
+  /* ── Render ── */
+  renderer.render(scene, camera);
+}
+
+// Spawn
+player.pos.set(0, CFG.STAND_HEIGHT, 30);
+
+tick();
+</script>
+</body>
+</html>
