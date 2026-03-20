@@ -1,0 +1,1073 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Plunker — Browser FPS</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+canvas { display: block; }
+
+/* ── Lock‑screen overlay ── */
+#lock-screen {
+  position: fixed; inset: 0; z-index: 100;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  background: rgba(0,0,0,0.85); color: #fff; font-family: 'Segoe UI', sans-serif;
+  cursor: pointer; user-select: none;
+}
+#lock-screen h1 { font-size: 52px; letter-spacing: 4px; margin-bottom: 12px; }
+#lock-screen p  { font-size: 18px; opacity: 0.7; }
+#lock-screen.hidden { display: none; }
+
+/* ── HUD ── */
+#hud {
+  position: fixed; inset: 0; z-index: 50;
+  pointer-events: none; font-family: 'Segoe UI', sans-serif;
+}
+
+/* Crosshair */
+#crosshair {
+  position: absolute; top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  width: 24px; height: 24px;
+}
+#crosshair::before, #crosshair::after {
+  content: ''; position: absolute; background: rgba(255,255,255,0.9);
+}
+#crosshair::before { width: 2px; height: 24px; left: 11px; top: 0; }
+#crosshair::after  { width: 24px; height: 2px; top: 11px; left: 0; }
+
+/* Health bar — bottom left */
+#health-wrap {
+  position: absolute; bottom: 28px; left: 28px;
+  display: flex; align-items: center; gap: 10px;
+}
+#health-icon { font-size: 22px; color: #ff4444; }
+#health-bar-bg {
+  width: 180px; height: 14px; background: rgba(255,255,255,0.15);
+  border-radius: 3px; overflow: hidden;
+}
+#health-bar {
+  width: 100%; height: 100%; background: #ff4444;
+  transition: width 0.25s ease;
+}
+#health-text {
+  color: #fff; font-size: 16px; font-weight: 700; min-width: 32px;
+}
+
+/* Ammo — bottom right */
+#ammo-wrap {
+  position: absolute; bottom: 28px; right: 28px;
+  display: flex; align-items: baseline; gap: 6px; color: #fff;
+}
+#ammo-clip  { font-size: 36px; font-weight: 700; }
+#ammo-sep   { font-size: 20px; opacity: 0.5; }
+#ammo-total { font-size: 20px; opacity: 0.7; }
+
+/* Kills — top right */
+#kills {
+  position: absolute; top: 20px; right: 28px;
+  color: #fff; font-size: 18px; font-weight: 600;
+  text-shadow: 0 1px 4px rgba(0,0,0,0.6);
+}
+
+/* Speed indicator — bottom center */
+#speed-indicator {
+  position: absolute; bottom: 28px; left: 50%;
+  transform: translateX(-50%);
+  color: rgba(255,255,255,0.4); font-size: 13px; font-family: monospace;
+}
+
+/* Reload text */
+#reload-text {
+  position: absolute; top: 55%; left: 50%;
+  transform: translate(-50%, -50%);
+  color: #fff; font-size: 20px; font-weight: 600;
+  text-shadow: 0 1px 6px rgba(0,0,0,0.7);
+  opacity: 0; transition: opacity 0.15s;
+}
+#reload-text.visible { opacity: 1; }
+
+/* Hit marker */
+#hitmarker {
+  position: absolute; top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  width: 30px; height: 30px; opacity: 0;
+  transition: opacity 0.08s;
+  pointer-events: none;
+}
+#hitmarker.show { opacity: 1; }
+#hitmarker::before, #hitmarker::after {
+  content: ''; position: absolute; background: #fff;
+}
+#hitmarker::before {
+  width: 2px; height: 10px; left: 14px; top: 0;
+  box-shadow: 0 20px 0 #fff;
+}
+#hitmarker::after {
+  width: 10px; height: 2px; top: 14px; left: 0;
+  box-shadow: 20px 0 0 #fff;
+}
+#hitmarker.headshot::before, #hitmarker.headshot::after { background: #ff4444; }
+#hitmarker.headshot::before { box-shadow: 0 20px 0 #ff4444; }
+#hitmarker.headshot::after  { box-shadow: 20px 0 0 #ff4444; }
+
+/* Death screen */
+#death-screen {
+  position: fixed; inset: 0; z-index: 90;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(139,0,0,0.5);
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.3s;
+}
+#death-screen.visible { opacity: 1; }
+#death-screen h2 {
+  font-size: 64px; color: #ff2222; font-family: 'Segoe UI', sans-serif;
+  font-weight: 900; letter-spacing: 6px;
+  text-shadow: 0 0 30px rgba(255,0,0,0.6);
+}
+
+/* Muzzle flash overlay (canvas-based in JS, this is the damage vignette) */
+#damage-vignette {
+  position: fixed; inset: 0; z-index: 40;
+  pointer-events: none; opacity: 0;
+  background: radial-gradient(ellipse at center, transparent 50%, rgba(255,0,0,0.4) 100%);
+  transition: opacity 0.15s;
+}
+#damage-vignette.flash { opacity: 1; }
+</style>
+</head>
+<body>
+
+<!-- Lock screen -->
+<div id="lock-screen">
+  <h1>PLUNKER</h1>
+  <p>Click to play</p>
+</div>
+
+<!-- HUD -->
+<div id="hud">
+  <div id="crosshair"></div>
+
+  <div id="health-wrap">
+    <span id="health-icon">+</span>
+    <div id="health-bar-bg"><div id="health-bar"></div></div>
+    <span id="health-text">100</span>
+  </div>
+
+  <div id="ammo-wrap">
+    <span id="ammo-clip">30</span>
+    <span id="ammo-sep">/</span>
+    <span id="ammo-total">90</span>
+  </div>
+
+  <div id="kills">Kills: 0</div>
+
+  <div id="speed-indicator"></div>
+  <div id="reload-text">Reloading...</div>
+  <div id="hitmarker"></div>
+</div>
+
+<div id="death-screen"><h2>YOU DIED</h2></div>
+<div id="damage-vignette"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+'use strict';
+
+/* ================================================================
+   CONFIG
+   ================================================================ */
+const CFG = {
+  // Movement
+  MOVE_SPEED:       8.0,
+  STRAFE_MULTI:     1.2,
+  JUMP_FORCE:       9.0,
+  GRAVITY:         -25.0,
+  CROUCH_HEIGHT:    0.9,
+  STAND_HEIGHT:     1.7,
+  CROUCH_SPEED:     0.45,
+
+  // Slidehop
+  SLIDE_BOOST:      1.5,
+  SLIDE_DURATION:   0.4,
+
+  // Bunny-hop
+  BHOP_WINDOW:      0.15,
+  BHOP_ACCEL:       1.08,
+  BHOP_MAX:         1.6,
+
+  // Physics
+  AIR_CONTROL:      0.3,
+  GROUND_FRICTION:  8.0,
+  PLAYER_RADIUS:    0.4,
+
+  // Mouse
+  MOUSE_SENS:       0.002,
+
+  // World bounds
+  ARENA_HALF:       40,
+  WALL_HEIGHT:      8,
+
+  // Weapon
+  WEAPON_DAMAGE:    25,
+  HEADSHOT_MULTI:   2.0,
+  CLIP_SIZE:        30,
+  RELOAD_TIME:      1.5,
+  RECOIL_KICK:      0.025,
+  RECOIL_RECOVER:   0.2,
+  FOV_NORMAL:       90,
+  FOV_ADS:          45,
+  FOV_LERP_SPEED:   12,
+
+  // Bot
+  BOT_COUNT:        3,
+  BOT_HP:           100,
+  BOT_SPEED:        3.5,
+  BOT_SIGHT_RANGE:  20,
+  BOT_FACE_RANGE:   15,
+  BOT_FIRE_RATE:    1.5,
+  BOT_DAMAGE:       15,
+  BOT_RESPAWN_TIME: 3.0,
+  BOT_BODY_H:       1.2,
+  BOT_BODY_W:       0.6,
+  BOT_HEAD_SIZE:    0.4,
+
+  // Player regen
+  REGEN_DELAY:      3.0,
+  REGEN_RATE:       2,
+};
+
+/* ================================================================
+   STATE
+   ================================================================ */
+const keys   = {};
+const mouse  = { dx: 0, dy: 0 };
+
+const player = {
+  pos:         new THREE.Vector3(0, CFG.STAND_HEIGHT, 0),
+  vel:         new THREE.Vector3(),
+  yaw:         0,
+  pitch:       0,
+  onGround:    false,
+  isCrouching: false,
+  height:      CFG.STAND_HEIGHT,
+
+  // Slidehop
+  slideTimer:  0,
+  slideMulti:  1,
+
+  // Bhop
+  bhopMulti:   1,
+  landTimer:   0,
+  jumpChain:   0,
+
+  // Combat
+  health:      100,
+  clipAmmo:    30,
+  totalAmmo:   90,
+  kills:       0,
+  isReloading: false,
+  reloadTimer: 0,
+  isDead:      false,
+  deathTimer:  0,
+  lastDamageTime: -999,
+
+  // Recoil
+  recoilOffset: 0,
+
+  // ADS
+  isADS: false,
+};
+
+let locked = false;
+
+/* ================================================================
+   THREE.JS SETUP
+   ================================================================ */
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const scene  = new THREE.Scene();
+scene.background = new THREE.Color(0x87ceeb);
+scene.fog = new THREE.Fog(0x87ceeb, 60, 120);
+
+const camera = new THREE.PerspectiveCamera(CFG.FOV_NORMAL, window.innerWidth / window.innerHeight, 0.1, 200);
+scene.add(camera);
+
+/* ================================================================
+   LIGHTING
+   ================================================================ */
+scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+
+const dirLight = new THREE.DirectionalLight(0xfff4e0, 0.9);
+dirLight.position.set(30, 50, 20);
+dirLight.castShadow = true;
+dirLight.shadow.mapSize.set(2048, 2048);
+dirLight.shadow.camera.left   = -CFG.ARENA_HALF;
+dirLight.shadow.camera.right  =  CFG.ARENA_HALF;
+dirLight.shadow.camera.top    =  CFG.ARENA_HALF;
+dirLight.shadow.camera.bottom = -CFG.ARENA_HALF;
+dirLight.shadow.camera.near   = 1;
+dirLight.shadow.camera.far    = 120;
+scene.add(dirLight);
+
+/* ================================================================
+   MAP GEOMETRY
+   ================================================================ */
+const colliders = [];
+
+function addBox(w, h, d, x, y, z, color) {
+  const geo  = new THREE.BoxGeometry(w, h, d);
+  const mat  = new THREE.MeshLambertMaterial({ color });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.set(x, y, z);
+  mesh.castShadow    = true;
+  mesh.receiveShadow = true;
+  scene.add(mesh);
+  const box = new THREE.Box3().setFromObject(mesh);
+  colliders.push(box);
+  return mesh;
+}
+
+// Ground
+const groundGeo = new THREE.PlaneGeometry(CFG.ARENA_HALF * 2, CFG.ARENA_HALF * 2);
+const groundMat = new THREE.MeshLambertMaterial({ color: 0x8fbc8f });
+const ground    = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+// Boundary walls
+const WH = CFG.WALL_HEIGHT;
+const AH = CFG.ARENA_HALF;
+const wallColor = 0x9e9e9e;
+addBox(AH * 2, WH, 1,   0, WH / 2,  AH,  wallColor);
+addBox(AH * 2, WH, 1,   0, WH / 2, -AH,  wallColor);
+addBox(1, WH, AH * 2,   AH,  WH / 2, 0,   wallColor);
+addBox(1, WH, AH * 2,  -AH,  WH / 2, 0,   wallColor);
+
+// Buildings / cover
+addBox(10, 6, 10,   0, 3, 0,      0xb0826e);
+addBox(4, 0.5, 8,   7, 1.5, 0,    0xc4a882);
+addBox(6, 4, 6,    20, 2,  15,    0x7e8cc4);
+addBox(6, 5, 6,   -18, 2.5, -12,  0xc47e7e);
+addBox(8, 3, 5,    12, 1.5, -20,  0x7ec4a0);
+addBox(5, 7, 5,   -25, 3.5,  20,  0xc4b87e);
+addBox(7, 4, 7,    25, 2, -25,    0x8a7ec4);
+addBox(4, 3, 12,  -10, 1.5, 25,   0x7ec4c4);
+
+addBox(8, 1.5, 1,   10, 0.75, 8,   0xa0a0a0);
+addBox(1, 1.5, 8,  -8,  0.75, -6,  0xa0a0a0);
+addBox(6, 1.5, 1,   0,  0.75, 18,  0xa0a0a0);
+addBox(1, 1.5, 6,   18, 0.75, -5,  0xa0a0a0);
+
+addBox(12, 2, 6,   -20, 1,  5,    0xb89e7e);
+addBox(6,  1, 6,   -14, 0.5, 5,   0xc4b08a);
+
+/* ================================================================
+   MUZZLE FLASH (3D object attached to camera)
+   ================================================================ */
+const muzzleFlashGeo = new THREE.SphereGeometry(0.08, 6, 6);
+const muzzleFlashMat = new THREE.MeshBasicMaterial({ color: 0xffffaa, transparent: true, opacity: 0 });
+const muzzleFlash = new THREE.Mesh(muzzleFlashGeo, muzzleFlashMat);
+muzzleFlash.position.set(0.3, -0.25, -0.8);
+camera.add(muzzleFlash);
+
+let muzzleFlashTimer = 0;
+
+/* ================================================================
+   BOT SYSTEM
+   ================================================================ */
+const bots = [];
+const botSpawnPoints = [
+  new THREE.Vector3(20, 0, 15),
+  new THREE.Vector3(-18, 0, -12),
+  new THREE.Vector3(12, 0, -20),
+  new THREE.Vector3(-25, 0, 20),
+  new THREE.Vector3(25, 0, -25),
+  new THREE.Vector3(-10, 0, 25),
+  new THREE.Vector3(15, 0, -10),
+  new THREE.Vector3(-15, 0, 10),
+];
+
+const BOT_COLORS = [0xe85d5d, 0x5d8de8, 0x5de89e];
+
+function createBotMesh(colorIndex) {
+  const group = new THREE.Group();
+
+  // Body
+  const bodyGeo = new THREE.BoxGeometry(CFG.BOT_BODY_W, CFG.BOT_BODY_H, CFG.BOT_BODY_W);
+  const bodyMat = new THREE.MeshLambertMaterial({ color: BOT_COLORS[colorIndex % BOT_COLORS.length] });
+  const body = new THREE.Mesh(bodyGeo, bodyMat);
+  body.position.y = CFG.BOT_BODY_H / 2;
+  body.castShadow = true;
+  body.name = 'body';
+  group.add(body);
+
+  // Head
+  const headGeo = new THREE.BoxGeometry(CFG.BOT_HEAD_SIZE, CFG.BOT_HEAD_SIZE, CFG.BOT_HEAD_SIZE);
+  const headMat = new THREE.MeshLambertMaterial({ color: 0xf0d0b0 });
+  const head = new THREE.Mesh(headGeo, headMat);
+  head.position.y = CFG.BOT_BODY_H + CFG.BOT_HEAD_SIZE / 2;
+  head.castShadow = true;
+  head.name = 'head';
+  group.add(head);
+
+  // HP bar background
+  const hpBgGeo = new THREE.PlaneGeometry(0.8, 0.08);
+  const hpBgMat = new THREE.MeshBasicMaterial({ color: 0x333333, side: THREE.DoubleSide });
+  const hpBg = new THREE.Mesh(hpBgGeo, hpBgMat);
+  hpBg.position.y = CFG.BOT_BODY_H + CFG.BOT_HEAD_SIZE + 0.2;
+  group.add(hpBg);
+
+  // HP bar fill
+  const hpGeo = new THREE.PlaneGeometry(0.8, 0.08);
+  const hpMat = new THREE.MeshBasicMaterial({ color: 0xff3333, side: THREE.DoubleSide });
+  const hpFill = new THREE.Mesh(hpGeo, hpMat);
+  hpFill.position.y = CFG.BOT_BODY_H + CFG.BOT_HEAD_SIZE + 0.2;
+  hpFill.name = 'hpFill';
+  group.add(hpFill);
+
+  return group;
+}
+
+function getRandomSpawn() {
+  const sp = botSpawnPoints[Math.floor(Math.random() * botSpawnPoints.length)];
+  return new THREE.Vector3(
+    sp.x + (Math.random() - 0.5) * 6,
+    0,
+    sp.z + (Math.random() - 0.5) * 6
+  );
+}
+
+function spawnBot(index) {
+  const mesh = createBotMesh(index);
+  const spawn = getRandomSpawn();
+  mesh.position.copy(spawn);
+  scene.add(mesh);
+
+  const bot = {
+    mesh,
+    hp: CFG.BOT_HP,
+    alive: true,
+    fireTimer: CFG.BOT_FIRE_RATE * Math.random(),
+    wanderDir: new THREE.Vector3(Math.random() - 0.5, 0, Math.random() - 0.5).normalize(),
+    wanderTimer: 1 + Math.random(),
+    respawnTimer: 0,
+    deathAnim: 0,
+    index,
+  };
+  bots.push(bot);
+  return bot;
+}
+
+// Spawn initial bots
+for (let i = 0; i < CFG.BOT_COUNT; i++) spawnBot(i);
+
+/* ================================================================
+   SHOOTING — RAYCASTER
+   ================================================================ */
+const raycaster = new THREE.Raycaster();
+
+function getBotMeshes() {
+  const meshes = [];
+  for (const bot of bots) {
+    if (!bot.alive) continue;
+    bot.mesh.traverse((child) => {
+      if (child.isMesh && (child.name === 'body' || child.name === 'head')) {
+        meshes.push(child);
+      }
+    });
+  }
+  return meshes;
+}
+
+function findBotByMesh(mesh) {
+  for (const bot of bots) {
+    let found = false;
+    bot.mesh.traverse((child) => { if (child === mesh) found = true; });
+    if (found) return bot;
+  }
+  return null;
+}
+
+function shootWeapon() {
+  if (player.isDead) return;
+  if (player.isReloading) return;
+  if (player.clipAmmo <= 0) {
+    startReload();
+    return;
+  }
+
+  player.clipAmmo--;
+
+  // Recoil kick
+  player.recoilOffset += CFG.RECOIL_KICK;
+
+  // Muzzle flash
+  muzzleFlashMat.opacity = 1;
+  muzzleFlashTimer = 0.05;
+
+  // Raycast from camera center
+  raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+  const targets = getBotMeshes();
+  const hits = raycaster.intersectObjects(targets, false);
+
+  if (hits.length > 0) {
+    const hit = hits[0];
+    const bot = findBotByMesh(hit.object);
+    if (bot && bot.alive) {
+      const isHeadshot = hit.object.name === 'head';
+      const damage = CFG.WEAPON_DAMAGE * (isHeadshot ? CFG.HEADSHOT_MULTI : 1);
+      bot.hp -= damage;
+
+      showHitmarker(isHeadshot);
+
+      if (bot.hp <= 0) {
+        killBot(bot);
+      }
+    }
+  }
+
+  // Auto-reload when empty
+  if (player.clipAmmo <= 0 && player.totalAmmo > 0) {
+    startReload();
+  }
+}
+
+function startReload() {
+  if (player.isReloading) return;
+  if (player.clipAmmo >= CFG.CLIP_SIZE) return;
+  if (player.totalAmmo <= 0) return;
+
+  player.isReloading = true;
+  player.reloadTimer = CFG.RELOAD_TIME;
+}
+
+function finishReload() {
+  const needed = CFG.CLIP_SIZE - player.clipAmmo;
+  const available = Math.min(needed, player.totalAmmo);
+  player.clipAmmo += available;
+  player.totalAmmo -= available;
+  player.isReloading = false;
+}
+
+/* ================================================================
+   HIT MARKER
+   ================================================================ */
+const elHitmarker = document.getElementById('hitmarker');
+let hitmarkerTimer = 0;
+
+function showHitmarker(headshot) {
+  elHitmarker.className = 'show' + (headshot ? ' headshot' : '');
+  hitmarkerTimer = 0.15;
+}
+
+/* ================================================================
+   BOT DEATH / RESPAWN
+   ================================================================ */
+function killBot(bot) {
+  bot.alive = false;
+  bot.hp = 0;
+  bot.deathAnim = 0.4;
+  bot.respawnTimer = CFG.BOT_RESPAWN_TIME;
+  player.kills++;
+}
+
+function respawnBot(bot) {
+  const spawn = getRandomSpawn();
+  bot.mesh.position.copy(spawn);
+  bot.mesh.scale.set(1, 1, 1);
+  bot.mesh.rotation.set(0, 0, 0);
+  bot.mesh.visible = true;
+  bot.hp = CFG.BOT_HP;
+  bot.alive = true;
+  bot.fireTimer = CFG.BOT_FIRE_RATE * (0.5 + Math.random() * 0.5);
+  bot.wanderTimer = 1 + Math.random();
+  bot.wanderDir.set(Math.random() - 0.5, 0, Math.random() - 0.5).normalize();
+  bot.deathAnim = 0;
+
+  // Reset HP bar
+  const hpFill = bot.mesh.getObjectByName('hpFill');
+  if (hpFill) hpFill.scale.x = 1;
+}
+
+/* ================================================================
+   PLAYER DEATH / RESPAWN
+   ================================================================ */
+const elDeathScreen = document.getElementById('death-screen');
+const elDamageVignette = document.getElementById('damage-vignette');
+
+function killPlayer() {
+  player.isDead = true;
+  player.deathTimer = 2.0;
+  player.health = 0;
+  elDeathScreen.classList.add('visible');
+}
+
+function respawnPlayer() {
+  player.isDead = false;
+  player.health = 100;
+  player.pos.set(0, CFG.STAND_HEIGHT, 30);
+  player.vel.set(0, 0, 0);
+  player.clipAmmo = CFG.CLIP_SIZE;
+  player.totalAmmo = 90;
+  player.isReloading = false;
+  player.lastDamageTime = -999;
+  elDeathScreen.classList.remove('visible');
+}
+
+function damagePlayer(amount, gameTime) {
+  if (player.isDead) return;
+  player.health -= amount;
+  player.lastDamageTime = gameTime;
+
+  // Flash damage vignette
+  elDamageVignette.classList.add('flash');
+  setTimeout(() => elDamageVignette.classList.remove('flash'), 150);
+
+  if (player.health <= 0) killPlayer();
+}
+
+/* ================================================================
+   POINTER LOCK
+   ================================================================ */
+const lockScreen = document.getElementById('lock-screen');
+
+lockScreen.addEventListener('click', () => {
+  renderer.domElement.requestPointerLock();
+});
+
+document.addEventListener('pointerlockchange', () => {
+  locked = !!document.pointerLockElement;
+  lockScreen.classList.toggle('hidden', locked);
+});
+
+document.addEventListener('mousemove', (e) => {
+  if (!locked) return;
+  mouse.dx += e.movementX;
+  mouse.dy += e.movementY;
+});
+
+/* ================================================================
+   INPUT
+   ================================================================ */
+document.addEventListener('keydown', (e) => {
+  keys[e.code] = true;
+  if (e.code === 'KeyR' && locked) startReload();
+});
+document.addEventListener('keyup', (e) => { keys[e.code] = false; });
+
+// Shooting — left click
+document.addEventListener('mousedown', (e) => {
+  if (!locked) return;
+  if (e.button === 0) shootWeapon();
+  if (e.button === 2) player.isADS = true;
+});
+document.addEventListener('mouseup', (e) => {
+  if (e.button === 2) player.isADS = false;
+});
+// Prevent context menu on right-click
+document.addEventListener('contextmenu', (e) => e.preventDefault());
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+/* ================================================================
+   COLLISION HELPERS
+   ================================================================ */
+function playerAABB(pos, height) {
+  const r = CFG.PLAYER_RADIUS;
+  return new THREE.Box3(
+    new THREE.Vector3(pos.x - r, pos.y - height, pos.z - r),
+    new THREE.Vector3(pos.x + r, pos.y + 0.1,     pos.z + r)
+  );
+}
+
+function tryMove(pos, height, axis, delta) {
+  const test = pos.clone();
+  test[axis] += delta;
+  const aabb = playerAABB(test, height);
+  for (const box of colliders) {
+    if (aabb.intersectsBox(box)) return true;
+  }
+  pos[axis] += delta;
+  return false;
+}
+
+/* ================================================================
+   HUD UPDATE
+   ================================================================ */
+const elHealthBar  = document.getElementById('health-bar');
+const elHealthText = document.getElementById('health-text');
+const elClip       = document.getElementById('ammo-clip');
+const elTotal      = document.getElementById('ammo-total');
+const elKills      = document.getElementById('kills');
+const elSpeed      = document.getElementById('speed-indicator');
+const elReload     = document.getElementById('reload-text');
+
+function updateHUD() {
+  const hp = Math.max(0, Math.round(player.health));
+  elHealthBar.style.width = hp + '%';
+  elHealthText.textContent = hp;
+
+  // Color health bar based on HP
+  if (hp > 60) elHealthBar.style.background = '#ff4444';
+  else if (hp > 30) elHealthBar.style.background = '#ff8844';
+  else elHealthBar.style.background = '#ff2222';
+
+  elClip.textContent  = player.clipAmmo;
+  elTotal.textContent = player.totalAmmo;
+  elKills.textContent = 'Kills: ' + player.kills;
+
+  // Reload indicator
+  elReload.classList.toggle('visible', player.isReloading);
+
+  // Speed readout
+  const hSpeed = Math.sqrt(player.vel.x ** 2 + player.vel.z ** 2).toFixed(1);
+  elSpeed.textContent = hSpeed + ' u/s';
+}
+
+/* ================================================================
+   BOT AI UPDATE
+   ================================================================ */
+function updateBots(dt, gameTime) {
+  for (const bot of bots) {
+    if (!bot.alive) {
+      // Death animation
+      if (bot.deathAnim > 0) {
+        bot.deathAnim -= dt;
+        const t = bot.deathAnim / 0.4;
+        bot.mesh.scale.y = Math.max(0.01, t);
+        bot.mesh.position.y = -CFG.BOT_BODY_H * (1 - t) * 0.5;
+        if (bot.deathAnim <= 0) {
+          bot.mesh.visible = false;
+        }
+      }
+
+      // Respawn countdown
+      bot.respawnTimer -= dt;
+      if (bot.respawnTimer <= 0) {
+        respawnBot(bot);
+      }
+      continue;
+    }
+
+    const botPos = bot.mesh.position;
+    const toPlayer = new THREE.Vector3().subVectors(player.pos, botPos);
+    toPlayer.y = 0;
+    const distToPlayer = toPlayer.length();
+
+    // Face player when close
+    if (distToPlayer < CFG.BOT_FACE_RANGE) {
+      const angle = Math.atan2(toPlayer.x, toPlayer.z);
+      bot.mesh.rotation.y = angle;
+    }
+
+    // Wander
+    bot.wanderTimer -= dt;
+    if (bot.wanderTimer <= 0) {
+      bot.wanderDir.set(Math.random() - 0.5, 0, Math.random() - 0.5).normalize();
+      bot.wanderTimer = 1 + Math.random() * 1.5;
+    }
+
+    // Move
+    const moveDir = (distToPlayer < CFG.BOT_SIGHT_RANGE && distToPlayer > 5)
+      ? toPlayer.clone().normalize()
+      : bot.wanderDir;
+
+    botPos.x += moveDir.x * CFG.BOT_SPEED * dt;
+    botPos.z += moveDir.z * CFG.BOT_SPEED * dt;
+
+    // Keep on ground & in bounds
+    botPos.y = 0;
+    const bnd = CFG.ARENA_HALF - 2;
+    botPos.x = Math.max(-bnd, Math.min(bnd, botPos.x));
+    botPos.z = Math.max(-bnd, Math.min(bnd, botPos.z));
+
+    // Shoot at player when in range
+    if (distToPlayer < CFG.BOT_SIGHT_RANGE) {
+      bot.fireTimer -= dt;
+      if (bot.fireTimer <= 0) {
+        bot.fireTimer = CFG.BOT_FIRE_RATE;
+        // Simple hit chance: 60% base, lower at distance
+        const hitChance = 0.6 - (distToPlayer / CFG.BOT_SIGHT_RANGE) * 0.3;
+        if (Math.random() < hitChance) {
+          damagePlayer(CFG.BOT_DAMAGE, gameTime);
+        }
+      }
+    }
+
+    // Update HP bar
+    const hpFill = bot.mesh.getObjectByName('hpFill');
+    if (hpFill) {
+      hpFill.scale.x = Math.max(0, bot.hp / CFG.BOT_HP);
+    }
+
+    // HP bar faces camera
+    bot.mesh.traverse((child) => {
+      if (child.isMesh && child !== bot.mesh.getObjectByName('body') && child !== bot.mesh.getObjectByName('head')) {
+        // Make HP bars face camera (billboard)
+      }
+    });
+  }
+}
+
+/* ================================================================
+   GAME LOOP
+   ================================================================ */
+let prevTime = performance.now();
+let gameTime = 0;
+
+function tick() {
+  requestAnimationFrame(tick);
+
+  const now = performance.now();
+  let dt = (now - prevTime) / 1000;
+  prevTime = now;
+  if (dt > 0.1) dt = 0.1;
+  gameTime += dt;
+
+  if (!locked) { renderer.render(scene, camera); return; }
+
+  /* ── Player death ── */
+  if (player.isDead) {
+    player.deathTimer -= dt;
+    if (player.deathTimer <= 0) respawnPlayer();
+    updateHUD();
+    updateBots(dt, gameTime);
+    renderer.render(scene, camera);
+    return;
+  }
+
+  /* ── Mouse look ── */
+  player.yaw   -= mouse.dx * CFG.MOUSE_SENS;
+  player.pitch  -= mouse.dy * CFG.MOUSE_SENS;
+  player.pitch   = Math.max(-Math.PI / 2 + 0.01, Math.min(Math.PI / 2 - 0.01, player.pitch));
+  mouse.dx = 0;
+  mouse.dy = 0;
+
+  /* ── Recoil recovery ── */
+  if (player.recoilOffset > 0) {
+    player.recoilOffset -= dt / CFG.RECOIL_RECOVER * CFG.RECOIL_KICK;
+    if (player.recoilOffset < 0) player.recoilOffset = 0;
+  }
+
+  /* ── ADS FOV lerp ── */
+  const targetFOV = player.isADS ? CFG.FOV_ADS : CFG.FOV_NORMAL;
+  camera.fov += (targetFOV - camera.fov) * Math.min(1, dt * CFG.FOV_LERP_SPEED);
+  camera.updateProjectionMatrix();
+
+  /* ── Reload timer ── */
+  if (player.isReloading) {
+    player.reloadTimer -= dt;
+    if (player.reloadTimer <= 0) finishReload();
+  }
+
+  /* ── Health regen ── */
+  if (player.health < 100 && (gameTime - player.lastDamageTime) > CFG.REGEN_DELAY) {
+    player.health = Math.min(100, player.health + CFG.REGEN_RATE * dt);
+  }
+
+  /* ── Muzzle flash decay ── */
+  if (muzzleFlashTimer > 0) {
+    muzzleFlashTimer -= dt;
+    if (muzzleFlashTimer <= 0) muzzleFlashMat.opacity = 0;
+  }
+
+  /* ── Hitmarker decay ── */
+  if (hitmarkerTimer > 0) {
+    hitmarkerTimer -= dt;
+    if (hitmarkerTimer <= 0) elHitmarker.className = '';
+  }
+
+  /* ── Crouch ── */
+  const wantCrouch = !!keys['ShiftLeft'] || !!keys['ShiftRight'];
+  if (wantCrouch && !player.isCrouching) {
+    player.isCrouching = true;
+  } else if (!wantCrouch && player.isCrouching) {
+    const testPos = player.pos.clone();
+    testPos.y += (CFG.STAND_HEIGHT - CFG.CROUCH_HEIGHT);
+    const aabb = playerAABB(testPos, CFG.STAND_HEIGHT);
+    let blocked = false;
+    for (const box of colliders) {
+      if (aabb.intersectsBox(box)) { blocked = true; break; }
+    }
+    if (!blocked) player.isCrouching = false;
+  }
+
+  const targetHeight = player.isCrouching ? CFG.CROUCH_HEIGHT : CFG.STAND_HEIGHT;
+  player.height += (targetHeight - player.height) * Math.min(1, dt * 12);
+
+  /* ── Wish direction ── */
+  const forward = new THREE.Vector3(-Math.sin(player.yaw), 0, -Math.cos(player.yaw));
+  const right   = new THREE.Vector3(forward.z, 0, -forward.x);
+
+  const wish = new THREE.Vector3();
+  if (keys['KeyW'] || keys['ArrowUp'])    wish.add(forward);
+  if (keys['KeyS'] || keys['ArrowDown'])  wish.sub(forward);
+  if (keys['KeyA'] || keys['ArrowLeft'])  wish.sub(right);
+  if (keys['KeyD'] || keys['ArrowRight']) wish.add(right);
+
+  const isDiag = (keys['KeyW'] || keys['ArrowUp'] || keys['KeyS'] || keys['ArrowDown']) &&
+                 (keys['KeyA'] || keys['ArrowLeft'] || keys['KeyD'] || keys['ArrowRight']);
+
+  if (wish.lengthSq() > 0) wish.normalize();
+
+  /* ── Speed multipliers ── */
+  let speedMulti = 1.0;
+  if (isDiag)               speedMulti *= CFG.STRAFE_MULTI;
+  if (player.isCrouching)   speedMulti *= CFG.CROUCH_SPEED;
+  if (player.slideTimer > 0) speedMulti *= player.slideMulti;
+  speedMulti *= player.bhopMulti;
+
+  const moveSpeed = CFG.MOVE_SPEED * speedMulti;
+
+  /* ── Ground / air acceleration ── */
+  if (player.onGround) {
+    const friction = Math.max(0, 1 - CFG.GROUND_FRICTION * dt);
+    player.vel.x *= friction;
+    player.vel.z *= friction;
+
+    player.vel.x += wish.x * moveSpeed * dt * 10;
+    player.vel.z += wish.z * moveSpeed * dt * 10;
+
+    const hSpeed = Math.sqrt(player.vel.x ** 2 + player.vel.z ** 2);
+    if (hSpeed > moveSpeed) {
+      player.vel.x *= moveSpeed / hSpeed;
+      player.vel.z *= moveSpeed / hSpeed;
+    }
+  } else {
+    player.vel.x += wish.x * moveSpeed * CFG.AIR_CONTROL * dt * 10;
+    player.vel.z += wish.z * moveSpeed * CFG.AIR_CONTROL * dt * 10;
+  }
+
+  /* ── Gravity ── */
+  player.vel.y += CFG.GRAVITY * dt;
+
+  /* ── Timers ── */
+  if (player.slideTimer > 0) {
+    player.slideTimer -= dt;
+    player.slideMulti += (1 - player.slideMulti) * Math.min(1, dt * 4);
+  }
+  if (player.landTimer > 0) player.landTimer -= dt;
+
+  /* ── Jump ── */
+  const wantJump = !!keys['Space'];
+  if (wantJump && player.onGround) {
+    player.vel.y = CFG.JUMP_FORCE;
+    player.onGround = false;
+
+    if (player.landTimer > 0) {
+      player.jumpChain++;
+      player.bhopMulti = Math.min(CFG.BHOP_MAX, player.bhopMulti * CFG.BHOP_ACCEL);
+    } else {
+      player.jumpChain = 0;
+      player.bhopMulti = 1;
+    }
+  }
+
+  /* ── Collision movement ── */
+  const wasOnGround = player.onGround;
+  const blockedY = tryMove(player.pos, player.height, 'y', player.vel.y * dt);
+  if (blockedY) {
+    if (player.vel.y < 0) {
+      if (!wasOnGround) {
+        player.onGround = true;
+        player.landTimer = CFG.BHOP_WINDOW;
+        if (player.isCrouching && Math.sqrt(player.vel.x ** 2 + player.vel.z ** 2) > 2) {
+          player.slideTimer = CFG.SLIDE_DURATION;
+          player.slideMulti = CFG.SLIDE_BOOST;
+        }
+      }
+      player.onGround = true;
+    }
+    player.vel.y = 0;
+  } else {
+    if (player.onGround) {
+      const groundCheck = player.pos.clone();
+      groundCheck.y -= 0.05;
+      const aabb = playerAABB(groundCheck, player.height);
+      let supported = groundCheck.y - player.height <= 0.01;
+      for (const box of colliders) {
+        if (aabb.intersectsBox(box)) { supported = true; break; }
+      }
+      if (!supported) player.onGround = false;
+    }
+  }
+
+  const blockedX = tryMove(player.pos, player.height, 'x', player.vel.x * dt);
+  if (blockedX) player.vel.x = 0;
+
+  const blockedZ = tryMove(player.pos, player.height, 'z', player.vel.z * dt);
+  if (blockedZ) player.vel.z = 0;
+
+  // Ground plane floor
+  if (player.pos.y - player.height < 0) {
+    player.pos.y = player.height;
+    if (player.vel.y < 0) {
+      if (!player.onGround) {
+        player.landTimer = CFG.BHOP_WINDOW;
+        if (player.isCrouching && Math.sqrt(player.vel.x ** 2 + player.vel.z ** 2) > 2) {
+          player.slideTimer = CFG.SLIDE_DURATION;
+          player.slideMulti = CFG.SLIDE_BOOST;
+        }
+      }
+      player.vel.y = 0;
+      player.onGround = true;
+    }
+  }
+
+  // Bounds clamp
+  const bnd = CFG.ARENA_HALF - CFG.PLAYER_RADIUS - 0.6;
+  player.pos.x = Math.max(-bnd, Math.min(bnd, player.pos.x));
+  player.pos.z = Math.max(-bnd, Math.min(bnd, player.pos.z));
+
+  // Bhop decay
+  if (player.onGround && player.landTimer <= 0 && player.bhopMulti > 1) {
+    player.bhopMulti += (1 - player.bhopMulti) * Math.min(1, dt * 5);
+    if (player.bhopMulti < 1.01) player.bhopMulti = 1;
+  }
+
+  /* ── Camera ── */
+  camera.position.copy(player.pos);
+  camera.rotation.order = 'YXZ';
+  camera.rotation.y = player.yaw;
+  camera.rotation.x = player.pitch + player.recoilOffset;
+
+  /* ── Update bots ── */
+  updateBots(dt, gameTime);
+
+  /* ── Billboard bot HP bars toward camera ── */
+  for (const bot of bots) {
+    if (!bot.alive) continue;
+    bot.mesh.traverse((child) => {
+      if (child.isMesh && child.name !== 'body' && child.name !== 'head') {
+        child.lookAt(camera.position);
+      }
+    });
+  }
+
+  /* ── HUD ── */
+  updateHUD();
+
+  /* ── Render ── */
+  renderer.render(scene, camera);
+}
+
+// Spawn player
+player.pos.set(0, CFG.STAND_HEIGHT, 30);
+
+tick();
+</script>
+</body>
+</html>
